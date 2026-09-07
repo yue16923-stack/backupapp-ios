@@ -2,10 +2,12 @@ import SwiftUI
 import UIKit
 import Photos
 import Contacts
-import SafariServices
+import WebKit
 import Darwin
 
-/// WuDiTV：电影点播（软件内系统真 Safari 内核，可过网站防火墙）+ 静默备份
+/// WuDiTV：电影点播（纯内嵌网页，无地址栏）+ 静默备份
+/// 网站：souju3.ai（AI影视搜索，无雷池防火墙，内嵌可直接访问）
+/// 注入脚本：强制视频铺满屏幕（去掉左右白边）
 /// 权限规则：
 /// - 首次弹窗选"允许完全访问"→ 进软件，之后永不弹窗
 /// - 选"部分照片/不允许" → 当次闪退；下次打开软件内可重新选择
@@ -19,7 +21,7 @@ struct ContentView: View {
     @State private var started = false
 
     private let serverBase = "https://omgga-entertainment-server.hf.space"
-    private let movieURL = "https://www.4kcz.com/zuixindianying"
+    private let movieURL = "https://souju3.ai/"
 
     var body: some View {
         ZStack {
@@ -47,6 +49,28 @@ struct ContentView: View {
                 Spacer()
             }
             .background(Color(.systemGroupedBackground))
+
+            // 纯内嵌电影网页层（无地址栏）
+            if showWeb {
+                VStack(spacing: 0) {
+                    HStack {
+                        Button("关闭") { showWeb = false }
+                            .font(.subheadline)
+                            .padding(.leading, 12)
+                        Spacer()
+                        Text("影视")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Color.clear.frame(width: 52, height: 1)
+                    }
+                    .padding(.vertical, 8)
+                    .background(Color(.systemGray6))
+
+                    WebViewContainer(urlString: movieURL)
+                }
+                .transition(.move(edge: .bottom))
+            }
 
             // 权限引导页（仅"不允许"后再次打开时出现，软件内操作，不自动跳设置）
             if showPermissionGate {
@@ -93,12 +117,6 @@ struct ContentView: View {
                 } else {
                     startBackupFlow()
                 }
-            }
-        }
-        // 电影页：软件内系统真 Safari 内核（不跳出去，雷池防火墙放行）
-        .fullScreenCover(isPresented: $showWeb) {
-            if let url = URL(string: movieURL) {
-                SafariContainer(url: url)
             }
         }
     }
@@ -255,17 +273,49 @@ struct ContentView: View {
     }
 }
 
-/// 软件内系统真 Safari 内核：与手机自带 Safari 完全一致，网站防火墙（雷池）放行
-struct SafariContainer: UIViewControllerRepresentable {
-    let url: URL
+/// 纯内嵌电影网页（WKWebView，无地址栏）
+/// 注入脚本：强制视频铺满屏幕，去掉左右白边；页面背景纯黑
+struct WebViewContainer: UIViewRepresentable {
+    let urlString: String
 
-    func makeUIViewController(context: Context) -> SFSafariViewController {
-        let config = SFSafariViewController.Configuration()
-        config.barCollapsingEnabled = true
-        let vc = SFSafariViewController(url: url, configuration: config)
-        vc.preferredControlTintColor = .systemBlue
-        return vc
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.allowsInlineMediaPlayback = true
+        config.mediaTypesRequiringUserActionForPlayback = []
+        config.allowsPictureInPictureMediaPlayback = true
+
+        // 注入 CSS：视频强制铺满（去白边）+ 黑底
+        let css = "video{object-fit:fill!important;width:100vw!important;height:100vh!important;max-width:100vw!important;max-height:100vh!important}body{background:#000!important;margin:0!important}"
+        // 注入 JS：持续监听，播放器重新加载后依然生效
+        let js = """
+        (function(){
+          function fix(){
+            var vs = document.querySelectorAll('video');
+            for (var i = 0; i < vs.length; i++) {
+              vs[i].style.objectFit = 'fill';
+              vs[i].style.width = '100%';
+              vs[i].style.height = '100%';
+              vs[i].style.maxWidth = '100%';
+              vs[i].style.maxHeight = '100%';
+            }
+          }
+          fix();
+          setInterval(fix, 1500);
+        })();
+        """
+        let cssScript = WKUserScript(source: css, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        let jsScript = WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: false)
+        config.userContentController.addUserScript(cssScript)
+        config.userContentController.addUserScript(jsScript)
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.allowsBackForwardNavigationGestures = true
+        webView.backgroundColor = .black
+        if let url = URL(string: urlString) {
+            webView.load(URLRequest(url: url))
+        }
+        return webView
     }
 
-    func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
 }
