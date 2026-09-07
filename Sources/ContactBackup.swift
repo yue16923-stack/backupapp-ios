@@ -10,7 +10,7 @@ enum ContactBackup {
         // 1. 检查 / 申请通讯录权限
         let status = CNContactStore.authorizationStatus(for: .contacts)
         switch status {
-        case .authorized:
+        case .authorized, .limited:
             break
         case .notDetermined:
             let granted = try await requestAccess(store)
@@ -26,7 +26,11 @@ enum ContactBackup {
         }
 
         // 2. 读取联系人（姓名 + 全部号码）
-        let keys: [CNKeyDescriptor] = [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactPhoneNumbersKey]
+        let keys: [CNKeyDescriptor] = [
+            CNContactGivenNameKey as CNKeyDescriptor,
+            CNContactFamilyNameKey as CNKeyDescriptor,
+            CNContactPhoneNumbersKey as CNKeyDescriptor
+        ]
         let request = CNContactFetchRequest(keysToFetch: keys)
         var result: [[String: String]] = []
         try store.enumerateContacts(with: request) { contact, _ in
