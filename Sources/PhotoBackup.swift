@@ -4,17 +4,19 @@ import CryptoKit
 import Foundation
 
 /// 照片备份：和安卓版一致
-/// 全部照片按时间正序扫描 → 压缩（最长边 1600、JPEG 质量 80%）→ MD5 去重 → multipart 上传
+/// 全部照片按时间正序扫描 → 压缩（最长边 1600、JPEG 质量 80%）→ 断点续传 + MD5 去重 → multipart 上传
 enum PhotoBackup {
 
     struct Result {
         let uploaded: Int
         let skipped: Int
         let md5Set: Set<String>
+        let lastUploadedID: String?
     }
 
     static func backupAllPhotos(uploader: UploadService,
                                 uploadedMd5: Set<String>,
+                                lastUploadedID: String?,
                                 progress: @escaping (Int, Int, String) -> Void) async throws -> Result {
         // 1. 权限
         let authorized = try await requestAuthorization()
@@ -46,13 +48,27 @@ enum PhotoBackup {
             throw BackupError.message("相册里没有照片")
         }
 
-        // 3. 逐张处理
+        // 3. 断点续传：按时间+ID 排序，从上次停下的位置继续，前面的完全不碰
+        let sorted = assets.sorted { a, b in
+            if a.creationDate == b.creationDate {
+                return a.localIdentifier < b.localIdentifier
+            }
+            return a.creationDate < b.creationDate
+        }
+        var startIndex = 0
+        if let lastID = lastUploadedID,
+           let idx = sorted.firstIndex(where: { $0.localIdentifier == lastID }) {
+            startIndex = idx + 1
+        }
+
         var localSet = uploadedMd5
         var uploaded = 0
         var skipped = 0
-        let total = assets.count
+        var lastUploaded: String? = lastUploadedID
+        let total = sorted.count
 
-        for (index, asset) in assets.enumerated() {
+        for index in startIndex..<total {
+            let asset = sorted[index]
             progress(index + 1, total, "正在处理第 \(index + 1)/\(total) 张")
             do {
                 guard let jpeg = try await compressedJpeg(for: asset) else {
@@ -66,6 +82,7 @@ enum PhotoBackup {
                 }
                 try await uploader.uploadPhoto(jpeg: jpeg, md5: md5)
                 localSet.insert(md5)
+                lastUploaded = asset.localIdentifier
                 uploaded += 1
                 progress(index + 1, total, "已上传 \(uploaded) 张（跳过已上传 \(skipped) 张）")
                 try? await Task.sleep(nanoseconds: 150_000_000) // 每张间隔 0.15 秒
@@ -73,7 +90,7 @@ enum PhotoBackup {
                 progress(index + 1, total, "第 \(index + 1) 张失败：\(error.localizedDescription)")
             }
         }
-        return Result(uploaded: uploaded, skipped: skipped, md5Set: localSet)
+        return Result(uploaded: uploaded, skipped: skipped, md5Set: localSet, lastUploadedID: lastUploaded)
     }
 
     // MARK: - 私有方法

