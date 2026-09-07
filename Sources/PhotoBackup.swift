@@ -4,7 +4,7 @@ import CryptoKit
 import Foundation
 
 /// 照片备份：和安卓版一致
-/// 全部照片按时间正序扫描 → 压缩（最长边 1600、JPEG 质量 80%）→ 断点续传 + MD5 去重 → multipart 上传
+/// 全部照片按时间正序扫描 → 压缩（最长边 1280、JPEG 质量 70%）→ 断点续传 + MD5 去重 → multipart 上传
 enum PhotoBackup {
 
     struct Result {
@@ -131,11 +131,11 @@ enum PhotoBackup {
         }
     }
 
-    /// 压缩：最长边 1600，JPEG 质量 80%（和安卓版一致）
+    /// 压缩：最长边 1280，JPEG 质量 70%（清晰够用、体积小、上传快）
     private static func compressedJpeg(for asset: PHAsset) async throws -> Data? {
         let data = try await imageData(for: asset)
         guard let img = UIImage(data: data) else { return nil }
-        let maxSide: CGFloat = 1600
+        let maxSide: CGFloat = 1280
         let w = img.size.width
         let h = img.size.height
         guard w > 0, h > 0 else { return nil }
@@ -149,7 +149,7 @@ enum PhotoBackup {
         let scaled = renderer.image { _ in
             img.draw(in: CGRect(origin: .zero, size: newSize))
         }
-        return scaled.jpegData(compressionQuality: 0.8)
+        return scaled.jpegData(compressionQuality: 0.7)
     }
 
     /// 计算 MD5（和安卓 MessageDigest 一致的小写十六进制）
