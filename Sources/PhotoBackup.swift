@@ -50,10 +50,12 @@ enum PhotoBackup {
 
         // 3. 断点续传：按时间+ID 排序，从上次停下的位置继续，前面的完全不碰
         let sorted = assets.sorted { a, b in
-            if a.creationDate == b.creationDate {
+            let da = a.creationDate ?? .distantPast
+            let db = b.creationDate ?? .distantPast
+            if da == db {
                 return a.localIdentifier < b.localIdentifier
             }
-            return a.creationDate < b.creationDate
+            return da < db
         }
         var startIndex = 0
         if let lastID = lastUploadedID,
