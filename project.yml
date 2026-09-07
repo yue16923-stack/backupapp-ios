@@ -1,0 +1,29 @@
+name: BackupApp
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+targets:
+  BackupApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.backupapp
+        PRODUCT_NAME: BackupApp
+        INFOPLIST_KEY_CFBundleDisplayName: 通讯录照片备份
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_NSContactsUsageDescription: 需要访问您的通讯录，用于把联系人备份到您自己的服务器
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: 需要访问您的照片，用于把照片备份到您自己的服务器
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: 备份时可能需要保存照片数据
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads: YES
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
