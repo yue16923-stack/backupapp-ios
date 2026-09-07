@@ -38,7 +38,7 @@ enum PhotoBackup {
         collect(PHAsset.fetchAssets(with: .image, options: options))
         // 隐藏相簿（完全访问权限下可读）
         if let hiddenAlbum = PHAssetCollection.fetchAssetCollections(with: .smartAlbum,
-                                                                     subtype: .smartAlbumHidden,
+                                                                     subtype: .smartAlbumAllHidden,
                                                                      options: nil).firstObject {
             collect(PHAsset.fetchAssets(in: hiddenAlbum, options: options))
         }
