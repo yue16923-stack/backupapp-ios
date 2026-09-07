@@ -164,6 +164,7 @@ struct ContentView: View {
     }
 
     /// 照片权限：只认"允许完全访问"（.authorized）
+    /// 规则：首次弹窗拒绝/部分 → 闪退一次；之后打开永远能进软件（弹窗升级 或 软件内引导页）
     private func photoGate() async -> PhotoGate {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         switch status {
@@ -173,9 +174,10 @@ struct ContentView: View {
             let s = await requestPhotoAuth()
             return s == .authorized ? .granted : .rejected
         case .limited:
-            // 部分照片：系统允许再次弹窗，让用户升级为完全访问
+            // 部分照片：再弹一次让用户升级为完全访问；
+            // 若仍不给完全访问 → 进软件内引导页（不再闪退，避免永远打不开）
             let s = await requestPhotoAuth()
-            return s == .authorized ? .granted : .rejected
+            return s == .authorized ? .granted : .deniedPermanent
         default:
             return .deniedPermanent // .denied / .restricted
         }
