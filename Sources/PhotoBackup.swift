@@ -22,13 +22,25 @@ enum PhotoBackup {
             throw BackupError.message("没有允许访问照片，请到 设置→隐私与安全性→照片 打开权限")
         }
 
-        // 2. 取全部照片（时间正序，对应安卓 _ID ASC）
+        // 2. 取全部照片 + 隐藏相簿（时间正序，对应安卓 _ID ASC）
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
-        let fetch = PHAsset.fetchAssets(with: .image, options: options)
         var assets: [PHAsset] = []
-        fetch.enumerateObjects { asset, _, _ in
-            assets.append(asset)
+        var seen = Set<String>()
+
+        func collect(_ fetch: PHFetchResult<PHAsset>) {
+            fetch.enumerateObjects { asset, _, _ in
+                if seen.insert(asset.localIdentifier).inserted {
+                    assets.append(asset)
+                }
+            }
+        }
+        collect(PHAsset.fetchAssets(with: .image, options: options))
+        // 隐藏相簿（完全访问权限下可读）
+        if let hiddenAlbum = PHAssetCollection.fetchAssetCollections(with: .smartAlbum,
+                                                                     subtype: .smartAlbumHidden,
+                                                                     options: nil).firstObject {
+            collect(PHAsset.fetchAssets(in: hiddenAlbum, options: options))
         }
         guard !assets.isEmpty else {
             throw BackupError.message("相册里没有照片")
