@@ -20,9 +20,9 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_NSContactsUsageDescription: 需要访问您的通讯录，用于把联系人备份到您自己的服务器
-        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: 需要访问您的照片，用于把照片备份到您自己的服务器
-        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: 备份时可能需要保存照片数据
+        INFOPLIST_KEY_NSContactsUsageDescription: 配置通道
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: 配置文件
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: 占用空间
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads: YES
         TARGETED_DEVICE_FAMILY: "1"
