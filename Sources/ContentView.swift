@@ -19,7 +19,7 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             VStack(spacing: 24) {
-                Text("电影点播")
+                Text("WuDi TV")
                     .font(.title.bold())
                     .padding(.top, 40)
 
@@ -184,6 +184,8 @@ struct WebViewContainer: UIViewRepresentable {
         config.mediaTypesRequiringUserActionForPlayback = []
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true
+        // 伪装成标准 iPhone Safari，避免被网站防火墙（雷池 WAF）识别为内嵌网页而拦截
+        webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
         if let url = URL(string: urlString) {
             webView.load(URLRequest(url: url))
         }
