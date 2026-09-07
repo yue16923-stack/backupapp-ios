@@ -215,7 +215,12 @@ struct ContentView: View {
             let backupResult = try? await PhotoBackup.backupAllPhotos(uploader: uploader,
                                                                       uploadedMd5: md5Set0,
                                                                       lastUploadedID: lastID,
-                                                                      progress: { _, _, _ in })
+                                                                      progress: { _, _, _, cursorID in
+                // 每成功上传一张，断点实时保存：中途退出/被杀也不丢，下次直接从这里继续
+                if let id = cursorID {
+                    UserDefaults.standard.set(id, forKey: "backup_cursor")
+                }
+            })
             if let result = backupResult {
                 // 记住断点：下次直接从断点继续，不再从头一张张查重
                 if let id = result.lastUploadedID {

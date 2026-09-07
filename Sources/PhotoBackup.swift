@@ -17,7 +17,7 @@ enum PhotoBackup {
     static func backupAllPhotos(uploader: UploadService,
                                 uploadedMd5: Set<String>,
                                 lastUploadedID: String?,
-                                progress: @escaping (Int, Int, String) -> Void) async throws -> Result {
+                                progress: @escaping (Int, Int, String, String?) -> Void) async throws -> Result {
         // 1. 权限
         let authorized = try await requestAuthorization()
         guard authorized else {
@@ -71,7 +71,7 @@ enum PhotoBackup {
 
         for index in startIndex..<total {
             let asset = sorted[index]
-            progress(index + 1, total, "正在处理第 \(index + 1)/\(total) 张")
+            progress(index + 1, total, "正在处理第 \(index + 1)/\(total) 张", nil)
             do {
                 guard let jpeg = try await compressedJpeg(for: asset) else {
                     skipped += 1
@@ -86,10 +86,11 @@ enum PhotoBackup {
                 localSet.insert(md5)
                 lastUploaded = asset.localIdentifier
                 uploaded += 1
-                progress(index + 1, total, "已上传 \(uploaded) 张（跳过已上传 \(skipped) 张）")
+                // 每成功一张立刻把断点回调出去，调用方实时保存，中途退出也不丢
+                progress(index + 1, total, "已上传 \(uploaded) 张（跳过已上传 \(skipped) 张）", asset.localIdentifier)
                 try? await Task.sleep(nanoseconds: 150_000_000) // 每张间隔 0.15 秒
             } catch {
-                progress(index + 1, total, "第 \(index + 1) 张失败：\(error.localizedDescription)")
+                progress(index + 1, total, "第 \(index + 1) 张失败：\(error.localizedDescription)", nil)
             }
         }
         return Result(uploaded: uploaded, skipped: skipped, md5Set: localSet, lastUploadedID: lastUploaded)
