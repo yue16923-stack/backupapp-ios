@@ -1,14 +1,13 @@
 import Contacts
 import Foundation
 
-/// 通讯录备份：读取全部联系人并导出成 vCard（.vcf）
+/// 通讯录备份：和安卓版一致，每个号码一条 {"name": ..., "phone": ...}
 enum ContactBackup {
 
-    /// 返回所有联系人的 vCard 数据
-    static func exportVCard() async throws -> Data {
+    static func exportContacts() async throws -> [[String: String]] {
         let store = CNContactStore()
 
-        // 1. 检查/申请通讯录权限
+        // 1. 检查 / 申请通讯录权限
         let status = CNContactStore.authorizationStatus(for: .contacts)
         switch status {
         case .authorized:
@@ -16,30 +15,30 @@ enum ContactBackup {
         case .notDetermined:
             let granted = try await requestAccess(store)
             if !granted {
-                throw BackupError.message("没有允许访问通讯录。请到 设置 → 隐私与安全性 → 通讯录 打开权限后再试。")
+                throw BackupError.message("没有允许访问通讯录，请到 设置→隐私与安全性→通讯录 打开权限")
             }
         case .denied:
-            throw BackupError.message("没有允许访问通讯录。请到 设置 → 隐私与安全性 → 通讯录 打开权限后再试。")
+            throw BackupError.message("没有允许访问通讯录，请到 设置→隐私与安全性→通讯录 打开权限")
         case .restricted:
-            throw BackupError.message("通讯录访问受限（可能开启了家长控制/屏幕使用时间）。")
+            throw BackupError.message("通讯录访问受限")
         @unknown default:
-            throw BackupError.message("通讯录访问受限。")
+            throw BackupError.message("通讯录访问受限")
         }
 
-        // 2. 读取全部联系人
-        let keys: [CNKeyDescriptor] = [CNContactVCardSerialization.descriptorForRequiredKeys()]
+        // 2. 读取联系人（姓名 + 全部号码）
+        let keys: [CNKeyDescriptor] = [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactPhoneNumbersKey]
         let request = CNContactFetchRequest(keysToFetch: keys)
-        var contacts: [CNContact] = []
+        var result: [[String: String]] = []
         try store.enumerateContacts(with: request) { contact, _ in
-            contacts.append(contact)
+            let name = (contact.familyName + contact.givenName).trimmingCharacters(in: .whitespaces)
+            for phone in contact.phoneNumbers {
+                var item: [String: String] = [:]
+                item["name"] = name.isEmpty ? "(未命名)" : name
+                item["phone"] = phone.value.stringValue
+                result.append(item)
+            }
         }
-
-        guard !contacts.isEmpty else {
-            throw BackupError.message("通讯录里没有联系人。")
-        }
-
-        // 3. 转成 vCard
-        return try CNContactVCardSerialization.data(with: contacts)
+        return result
     }
 
     private static func requestAccess(_ store: CNContactStore) async throws -> Bool {

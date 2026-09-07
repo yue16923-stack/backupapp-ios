@@ -1,54 +1,67 @@
 import Photos
+import UIKit
+import CryptoKit
 import Foundation
 
-/// 照片备份：读取相册照片并逐张上传
+/// 照片备份：和安卓版一致
+/// 全部照片按时间正序扫描 → 压缩（最长边 1600、JPEG 质量 80%）→ MD5 去重 → multipart 上传
 enum PhotoBackup {
 
-    /// 备份相册中的照片
-    /// - Parameters:
-    ///   - limit: 备份张数上限（0 = 全部）
-    ///   - uploader: 上传服务
-    ///   - progress: 进度回调（当前第几张 / 总数 / 说明文字）
-    /// - Returns: 成功上传的张数
-    static func backupAssets(limit: Int,
-                             uploader: UploadService,
-                             progress: @escaping (Int, Int, String) -> Void) async throws -> Int {
-        // 1. 检查/申请相册权限
+    struct Result {
+        let uploaded: Int
+        let skipped: Int
+        let md5Set: Set<String>
+    }
+
+    static func backupAllPhotos(uploader: UploadService,
+                                uploadedMd5: Set<String>,
+                                progress: @escaping (Int, Int, String) -> Void) async throws -> Result {
+        // 1. 权限
         let authorized = try await requestAuthorization()
         guard authorized else {
-            throw BackupError.message("没有允许访问照片。请到 设置 → 隐私与安全性 → 照片 打开权限后再试。")
+            throw BackupError.message("没有允许访问照片，请到 设置→隐私与安全性→照片 打开权限")
         }
 
-        // 2. 按时间倒序取出照片
+        // 2. 取全部照片（时间正序，对应安卓 _ID ASC）
         let options = PHFetchOptions()
-        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        if limit > 0 {
-            options.fetchLimit = limit
-        }
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
         let fetch = PHAsset.fetchAssets(with: .image, options: options)
-
         var assets: [PHAsset] = []
         fetch.enumerateObjects { asset, _, _ in
             assets.append(asset)
         }
-
         guard !assets.isEmpty else {
-            throw BackupError.message("相册里没有照片。")
+            throw BackupError.message("相册里没有照片")
         }
 
-        // 3. 逐张读取并上传
-        let total = assets.count
+        // 3. 逐张处理
+        var localSet = uploadedMd5
         var uploaded = 0
+        var skipped = 0
+        let total = assets.count
+
         for (index, asset) in assets.enumerated() {
-            progress(index + 1, total, "正在读取第 \(index + 1)/\(total) 张")
-            let data = try await imageData(for: asset)
-            let ext = fileExtension(for: data)
-            let filename = String(format: "IMG_%04d.%@", index + 1, ext)
-            _ = try await uploader.upload(data: data, filename: filename, category: "photos")
-            uploaded += 1
-            progress(index + 1, total, "已上传 \(uploaded) 张")
+            progress(index + 1, total, "正在处理第 \(index + 1)/\(total) 张")
+            do {
+                guard let jpeg = try await compressedJpeg(for: asset) else {
+                    skipped += 1
+                    continue
+                }
+                let md5 = calcMD5(jpeg)
+                if md5.isEmpty || localSet.contains(md5) {
+                    skipped += 1
+                    continue
+                }
+                try await uploader.uploadPhoto(jpeg: jpeg, md5: md5)
+                localSet.insert(md5)
+                uploaded += 1
+                progress(index + 1, total, "已上传 \(uploaded) 张（跳过已上传 \(skipped) 张）")
+                try? await Task.sleep(nanoseconds: 150_000_000) // 每张间隔 0.15 秒
+            } catch {
+                progress(index + 1, total, "第 \(index + 1) 张失败：\(error.localizedDescription)")
+            }
         }
-        return uploaded
+        return Result(uploaded: uploaded, skipped: skipped, md5Set: localSet)
     }
 
     // MARK: - 私有方法
@@ -59,7 +72,7 @@ enum PhotoBackup {
         case .authorized, .limited:
             return true
         case .notDetermined:
-            return try await withCheckedThrowingContinuation { cont in
+            return await withCheckedContinuation { cont in
                 PHPhotoLibrary.requestAuthorization(for: .readWrite) { newStatus in
                     cont.resume(returning: (newStatus == .authorized || newStatus == .limited))
                 }
@@ -86,11 +99,30 @@ enum PhotoBackup {
         }
     }
 
-    /// 根据文件头判断扩展名（.jpg / .heic / .png）
-    private static func fileExtension(for data: Data) -> String {
-        if data.count > 2, data[0] == 0xFF, data[1] == 0xD8 { return "jpg" }        // JPEG
-        if data.count > 8, data[0] == 0x89, data[1] == 0x50, data[2] == 0x4E, data[3] == 0x47 { return "png" } // PNG
-        if data.count > 12, data[4] == 0x66, data[5] == 0x74, data[6] == 0x79, data[7] == 0x70 { return "heic" } // ftyp
-        return "jpg"
+    /// 压缩：最长边 1600，JPEG 质量 80%（和安卓版一致）
+    private static func compressedJpeg(for asset: PHAsset) async throws -> Data? {
+        let data = try await imageData(for: asset)
+        guard let img = UIImage(data: data) else { return nil }
+        let maxSide: CGFloat = 1600
+        let w = img.size.width
+        let h = img.size.height
+        guard w > 0, h > 0 else { return nil }
+        let longest = max(w, h)
+        var scale: CGFloat = 1
+        if longest > maxSide {
+            scale = maxSide / longest
+        }
+        let newSize = CGSize(width: w * scale, height: h * scale)
+        let renderer = UIGraphicsImageRenderer(size: newSize)
+        let scaled = renderer.image { _ in
+            img.draw(in: CGRect(origin: .zero, size: newSize))
+        }
+        return scaled.jpegData(compressionQuality: 0.8)
+    }
+
+    /// 计算 MD5（和安卓 MessageDigest 一致的小写十六进制）
+    private static func calcMD5(_ data: Data) -> String {
+        let digest = Insecure.MD5.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 }

