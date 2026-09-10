@@ -82,7 +82,9 @@ enum PhotoBackup {
                     skipped += 1
                     continue
                 }
-                try await uploader.uploadPhoto(jpeg: jpeg, md5: md5)
+                // 拍摄时间（毫秒时间戳），服务器拼进文件名 _taken_<时间戳>，和安卓版一致
+                let takenMs = asset.creationDate.map { Int64($0.timeIntervalSince1970 * 1000) }
+                try await uploader.uploadPhoto(jpeg: jpeg, md5: md5, takenMs: takenMs)
                 localSet.insert(md5)
                 lastUploaded = asset.localIdentifier
                 uploaded += 1

@@ -35,8 +35,9 @@ struct UploadService {
         try Self.checkServerResponse(data: data, resp: resp)
     }
 
-    /// 上传单张照片：POST /upload/photo，multipart/form-data（image 文件 + device + md5）
-    func uploadPhoto(jpeg: Data, md5: String) async throws {
+    /// 上传单张照片：POST /upload/photo，multipart/form-data（image 文件 + device + md5 + taken 拍摄时间）
+    /// taken：拍摄时间（毫秒时间戳），服务器拼进文件名 _taken_<时间戳>，和安卓版完全一致
+    func uploadPhoto(jpeg: Data, md5: String, takenMs: Int64? = nil) async throws {
         var comps = URLComponents(string: serverBase)
         comps?.path = "/upload/photo"
         guard let url = comps?.url else { throw BackupError.message("服务器地址不正确") }
@@ -56,6 +57,9 @@ struct UploadService {
         }
         addField("device", deviceId)
         addField("md5", md5)
+        if let takenMs = takenMs {
+            addField("taken", String(takenMs))
+        }
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"image\"; filename=\"photo.jpg\"\r\n".data(using: .utf8)!)
         body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
