@@ -15,7 +15,7 @@ enum PhotoBackup {
     }
 
     static func backupAllPhotos(uploader: UploadService,
-                                uploadedMd5: Set<String>,
+                                knownMd5: Set<String>,
                                 lastUploadedID: String?,
                                 progress: @escaping (Int, Int, String, String?) -> Void) async throws -> Result {
         // 1. 权限
@@ -63,7 +63,7 @@ enum PhotoBackup {
             startIndex = idx + 1
         }
 
-        var localSet = uploadedMd5
+        var localSet = knownMd5
         var uploaded = 0
         var skipped = 0
         var lastUploaded: String? = lastUploadedID

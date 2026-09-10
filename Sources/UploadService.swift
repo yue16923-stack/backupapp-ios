@@ -68,6 +68,32 @@ struct UploadService {
         try Self.checkServerResponse(data: data, resp: resp)
     }
 
+    /// 查询服务器该设备现存照片数量：GET /api/photo_status?device=xxx
+    /// 用于判断服务器是否被删过照片：服务器数量 < 本地已传数量 → 触发全量补传
+    func fetchServerPhotoCount() async throws -> Int {
+        var comps = URLComponents(string: serverBase)
+        comps?.path = "/api/photo_status"
+        comps?.queryItems = [URLQueryItem(name: "device", value: deviceId)]
+        guard let url = comps?.url else { throw BackupError.message("服务器地址不正确") }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+
+        let (data, resp) = try await URLSession.shared.data(for: request)
+        guard let http = resp as? HTTPURLResponse else {
+            throw BackupError.message("网络响应异常")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let text = String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)"
+            throw BackupError.message("服务器返回错误：\(text)")
+        }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let count = obj["count"] as? Int else {
+            return 0
+        }
+        return count
+    }
+
     /// 检查服务器返回：HTTP 2xx 且 {"status":"success"} 才算成功
     private static func checkServerResponse(data: Data, resp: URLResponse) throws {
         guard let http = resp as? HTTPURLResponse else {

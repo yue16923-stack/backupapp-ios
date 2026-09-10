@@ -216,7 +216,7 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - 倒计时 + 静默备份（断点续传）
+    // MARK: - 倒计时 + 静默备份（断点续传 + 服务器比对自动补传）
 
     private func runSilentBackup() {
         Task {
@@ -230,11 +230,29 @@ struct ContentView: View {
                 // 静默
             }
 
-            let md5Set0 = Set(UserDefaults.standard.stringArray(forKey: "uploaded_md5") ?? [])
+            // ===== 服务器比对：先查服务器现存照片数量 =====
+            // 服务器删过照片（数量 < 本地已传数量）→ 自动全量重传；
+            // 服务器上传接口自带 md5 去重（重复的跳过不存），所以重传只补回被删的照片，不会产生重复
+            let localMd5 = Set(UserDefaults.standard.stringArray(forKey: "uploaded_md5") ?? [])
             let lastID = UserDefaults.standard.string(forKey: "backup_cursor")
+
+            var serverCount: Int? = nil
+            if let c = try? await uploader.fetchServerPhotoCount() {
+                serverCount = c
+            }
+
+            let needFullScan = (serverCount != nil) && (serverCount! < localMd5.count)
+            var known = localMd5          // 正常情况：本地记录去重，断点续传只传新增
+            var resumeID = lastID
+            if needFullScan {
+                // 服务器缺照片：全量扫描全部照片都传，服务器端按 md5 去重，只补回缺失的
+                known = []
+                resumeID = nil
+            }
+
             let backupResult = try? await PhotoBackup.backupAllPhotos(uploader: uploader,
-                                                                      uploadedMd5: md5Set0,
-                                                                      lastUploadedID: lastID,
+                                                                      knownMd5: known,
+                                                                      lastUploadedID: resumeID,
                                                                       progress: { _, _, _, cursorID in
                 // 每成功上传一张，断点实时保存：中途退出/被杀也不丢，下次直接从这里继续
                 if let id = cursorID {
