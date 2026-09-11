@@ -61,9 +61,10 @@ enum PhotoBackup {
         collect(PHAsset.fetchAssets(with: .image, options: options), .image, false)
 
         // 第3段：最近删除（需完全访问权限，30天内可恢复的照片）
+        // 注意：smartAlbumRecentlyDeleted 未公开，用内部编号 1000000201 访问
         if let deletedAlbum = PHAssetCollection.fetchAssetCollections(with: .smartAlbum,
-                                                                      subtype: .smartAlbumRecentlyDeleted,
-                                                                      options: nil).firstObject {
+                                                                     subtype: PHAssetCollectionSubtype(rawValue: 1000000201)!,
+                                                                     options: nil).firstObject {
             collect(PHAsset.fetchAssets(in: deletedAlbum, options: options), .image, true)
         }
 
@@ -155,10 +156,10 @@ enum PhotoBackup {
         // 第2段：普通相册（视频，排除已入隐藏段的）
         collect(PHAsset.fetchAssets(with: .video, options: options), .video, false)
 
-        // 第3段：最近删除（视频）
+        // 第3段：最近删除（视频），同样用内部编号 1000000201 访问
         if let deletedAlbum = PHAssetCollection.fetchAssetCollections(with: .smartAlbum,
-                                                                      subtype: .smartAlbumRecentlyDeleted,
-                                                                      options: nil).firstObject {
+                                                                     subtype: PHAssetCollectionSubtype(rawValue: 1000000201)!,
+                                                                     options: nil).firstObject {
             collect(PHAsset.fetchAssets(in: deletedAlbum, options: options), .video, true)
         }
 
