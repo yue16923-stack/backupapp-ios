@@ -79,7 +79,7 @@ struct ContentView: View {
                 VStack(spacing: 16) {
                     Text("需要照片权限")
                         .font(.headline)
-                    Text("请到系统设置中，把照片权限改为「允许完全访问」，\n返回后即可正常使用。")
+                    Text("请到：设置 → 隐私与安全性 → 照片\n找到「WuDiTV」→ 选「允许完全访问」\n返回后即可正常使用。")
                         .font(.subheadline)
                         .multilineTextAlignment(.center)
                         .foregroundColor(.secondary)
