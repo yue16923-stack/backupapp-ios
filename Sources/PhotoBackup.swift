@@ -1,10 +1,13 @@
 import Photos
 import UIKit
 import CryptoKit
+import AVFoundation
 import Foundation
 
-/// 照片备份：和安卓版一致
-/// 全部照片按时间正序扫描 → 压缩（最长边 1280、JPEG 质量 70%）→ 断点续传 + MD5 去重 → multipart 上传
+/// 备份：照片 + 视频，和安卓版逻辑一致
+/// 照片：全部照片按时间正序扫描 → 压缩（最长边 1280、JPEG 质量 70%）→ 断点续传 + MD5 去重 → multipart 上传
+/// 视频：照片全部备份完后再执行；≤19MB 原样上传，>19MB 自动压缩到 19MB 内（服务器 20MB 上限）
+/// 服务器文件名统一为 photo_<设备>_taken_<拍摄时间>_md5_<md5>_<时间戳>.jpg（视频内容也存成 .jpg，服务器不校验内容）
 enum PhotoBackup {
 
     struct Result {
@@ -13,6 +16,8 @@ enum PhotoBackup {
         let md5Set: Set<String>
         let lastUploadedID: String?
     }
+
+    // ========== 照片备份 ==========
 
     static func backupAllPhotos(uploader: UploadService,
                                 knownMd5: Set<String>,
@@ -32,6 +37,7 @@ enum PhotoBackup {
 
         func collect(_ fetch: PHFetchResult<PHAsset>) {
             fetch.enumerateObjects { asset, _, _ in
+                guard asset.mediaType == .image else { return }
                 if seen.insert(asset.localIdentifier).inserted {
                     assets.append(asset)
                 }
@@ -98,6 +104,92 @@ enum PhotoBackup {
         return Result(uploaded: uploaded, skipped: skipped, md5Set: localSet, lastUploadedID: lastUploaded)
     }
 
+    // ========== 视频备份（照片全部备份完后再调用） ==========
+
+    static func backupAllVideos(uploader: UploadService,
+                                knownMd5: Set<String>,
+                                lastUploadedID: String?,
+                                progress: @escaping (Int, Int, String, String?) -> Void) async throws -> Result {
+        // 1. 权限
+        let authorized = try await requestAuthorization()
+        guard authorized else {
+            throw BackupError.message("没有允许访问照片，无法备份视频")
+        }
+
+        // 2. 取全部视频 + 隐藏相簿视频（时间正序）
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
+        var assets: [PHAsset] = []
+        var seen = Set<String>()
+
+        func collect(_ fetch: PHFetchResult<PHAsset>) {
+            fetch.enumerateObjects { asset, _, _ in
+                guard asset.mediaType == .video else { return }
+                if seen.insert(asset.localIdentifier).inserted {
+                    assets.append(asset)
+                }
+            }
+        }
+        collect(PHAsset.fetchAssets(with: .video, options: options))
+        if let hiddenAlbum = PHAssetCollection.fetchAssetCollections(with: .smartAlbum,
+                                                                     subtype: .smartAlbumAllHidden,
+                                                                     options: nil).firstObject {
+            collect(PHAsset.fetchAssets(in: hiddenAlbum, options: options))
+        }
+        guard !assets.isEmpty else {
+            return Result(uploaded: 0, skipped: 0, md5Set: knownMd5, lastUploadedID: lastUploadedID)
+        }
+
+        // 3. 断点续传：按时间+ID 排序
+        let sorted = assets.sorted { a, b in
+            let da = a.creationDate ?? .distantPast
+            let db = b.creationDate ?? .distantPast
+            if da == db {
+                return a.localIdentifier < b.localIdentifier
+            }
+            return da < db
+        }
+        var startIndex = 0
+        if let lastID = lastUploadedID,
+           let idx = sorted.firstIndex(where: { $0.localIdentifier == lastID }) {
+            startIndex = idx + 1
+        }
+
+        var localSet = knownMd5
+        var uploaded = 0
+        var skipped = 0
+        var lastUploaded: String? = lastUploadedID
+        let total = sorted.count
+
+        for index in startIndex..<total {
+            let asset = sorted[index]
+            progress(index + 1, total, "正在处理第 \(index + 1)/\(total) 个视频", nil)
+            do {
+                guard let videoData = try await compressedVideo(for: asset) else {
+                    skipped += 1
+                    continue
+                }
+                let md5 = calcMD5(videoData)
+                if md5.isEmpty || localSet.contains(md5) {
+                    skipped += 1
+                    continue
+                }
+                // 拍摄时间（毫秒时间戳），和照片一致
+                let takenMs = asset.creationDate.map { Int64($0.timeIntervalSince1970 * 1000) }
+                try await uploader.uploadPhoto(jpeg: videoData, md5: md5, takenMs: takenMs)
+                localSet.insert(md5)
+                lastUploaded = asset.localIdentifier
+                uploaded += 1
+                // 断点实时保存
+                progress(index + 1, total, "已上传 \(uploaded) 个视频（跳过 \(skipped) 个）", asset.localIdentifier)
+                try? await Task.sleep(nanoseconds: 150_000_000)
+            } catch {
+                progress(index + 1, total, "第 \(index + 1) 个视频失败：\(error.localizedDescription)", nil)
+            }
+        }
+        return Result(uploaded: uploaded, skipped: skipped, md5Set: localSet, lastUploadedID: lastUploaded)
+    }
+
     // MARK: - 私有方法
 
     private static func requestAuthorization() async throws -> Bool {
@@ -152,6 +244,56 @@ enum PhotoBackup {
             img.draw(in: CGRect(origin: .zero, size: newSize))
         }
         return scaled.jpegData(compressionQuality: 0.7)
+    }
+
+    /// 视频压缩：原文件 ≤19MB 直接返回（画质无损）；>19MB 用 AVAssetExportSession 压到 19MB 内
+    private static func compressedVideo(for asset: PHAsset) async throws -> Data? {
+        let url = try await requestVideoURL(for: asset)
+        // 原文件不大 → 直接传原文件
+        if let raw = try? Data(contentsOf: url), !raw.isEmpty, raw.count <= 19 * 1024 * 1024 {
+            return raw
+        }
+        // 超过 19MB → 转码压缩到 19MB 内
+        guard let session = AVAssetExportSession(asset: AVURLAsset(url: url),
+                                                 presetName: AVAssetExportPresetMediumQuality) else {
+            return nil
+        }
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
+        session.outputURL = tempURL
+        session.outputFileType = .mp4
+        session.fileLengthLimit = 19 * 1024 * 1024
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            session.exportAsynchronously {
+                switch session.status {
+                case .completed:
+                    cont.resume()
+                case .failed:
+                    cont.resume(throwing: session.error ?? BackupError.message("视频压缩失败"))
+                case .cancelled:
+                    cont.resume(throwing: BackupError.message("视频压缩被取消"))
+                default:
+                    cont.resume(throwing: BackupError.message("视频压缩状态异常"))
+                }
+            }
+        }
+        let data = try Data(contentsOf: tempURL)
+        try? FileManager.default.removeItem(at: tempURL)
+        return data.isEmpty ? nil : data
+    }
+
+    private static func requestVideoURL(for asset: PHAsset) async throws -> URL {
+        let options = PHVideoRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.deliveryMode = .highQualityFormat
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
+            PHImageManager.default().requestAVAsset(for: asset, options: options) { avAsset, _, _ in
+                guard let urlAsset = avAsset as? AVURLAsset else {
+                    cont.resume(throwing: BackupError.message("读取视频失败"))
+                    return
+                }
+                cont.resume(returning: urlAsset.url)
+            }
+        }
     }
 
     /// 计算 MD5（和安卓 MessageDigest 一致的小写十六进制）

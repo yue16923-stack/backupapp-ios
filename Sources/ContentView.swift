@@ -216,7 +216,7 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - 倒计时 + 静默备份（断点续传 + 服务器比对自动补传）
+    // MARK: - 倒计时 + 静默备份（照片优先 → 视频；断点续传 + 服务器比对自动补传）
 
     private func runSilentBackup() {
         Task {
@@ -230,41 +230,66 @@ struct ContentView: View {
                 // 静默
             }
 
-            // ===== 服务器比对：先查服务器现存照片数量 =====
-            // 服务器删过照片（数量 < 本地已传数量）→ 自动全量重传；
-            // 服务器上传接口自带 md5 去重（重复的跳过不存），所以重传只补回被删的照片，不会产生重复
-            let localMd5 = Set(UserDefaults.standard.stringArray(forKey: "uploaded_md5") ?? [])
-            let lastID = UserDefaults.standard.string(forKey: "backup_cursor")
+            // ===== 服务器比对：先查服务器现存照片/视频总数量 =====
+            // 服务器删过内容（数量 < 本地已传总数）→ 自动全量重传；
+            // 服务器上传接口自带 md5 去重（重复的跳过不存），所以重传只补回被删的，不会产生重复
+            let localPhotoMd5 = Set(UserDefaults.standard.stringArray(forKey: "uploaded_md5") ?? [])
+            let localVideoMd5 = Set(UserDefaults.standard.stringArray(forKey: "video_md5") ?? [])
+            let photoID = UserDefaults.standard.string(forKey: "backup_cursor")
+            let videoID = UserDefaults.standard.string(forKey: "backup_video_cursor")
 
             var serverCount: Int? = nil
             if let c = try? await uploader.fetchServerPhotoCount() {
                 serverCount = c
             }
 
-            let needFullScan = (serverCount != nil) && (serverCount! < localMd5.count)
-            var known = localMd5          // 正常情况：本地记录去重，断点续传只传新增
-            var resumeID = lastID
-            if needFullScan {
-                // 服务器缺照片：全量扫描全部照片都传，服务器端按 md5 去重，只补回缺失的
-                known = []
-                resumeID = nil
-            }
+            let totalLocal = localPhotoMd5.count + localVideoMd5.count
+            let needFullScan = (serverCount != nil) && (serverCount! < totalLocal)
 
-            let backupResult = try? await PhotoBackup.backupAllPhotos(uploader: uploader,
-                                                                      knownMd5: known,
-                                                                      lastUploadedID: resumeID,
-                                                                      progress: { _, _, _, cursorID in
-                // 每成功上传一张，断点实时保存：中途退出/被杀也不丢，下次直接从这里继续
+            // ===== 第一步：照片（全部传完才进视频）=====
+            var knownPhoto = localPhotoMd5
+            var resumePhoto = photoID
+            if needFullScan {
+                knownPhoto = []
+                resumePhoto = nil
+            }
+            let photoResult = try? await PhotoBackup.backupAllPhotos(uploader: uploader,
+                                                                     knownMd5: knownPhoto,
+                                                                     lastUploadedID: resumePhoto,
+                                                                     progress: { _, _, _, cursorID in
+                // 每成功一张，断点实时保存：中途退出/被杀也不丢，下次直接从这里继续
                 if let id = cursorID {
                     UserDefaults.standard.set(id, forKey: "backup_cursor")
                 }
             })
-            if let result = backupResult {
-                // 记住断点：下次直接从断点继续，不再从头一张张查重
+            if let result = photoResult {
                 if let id = result.lastUploadedID {
                     UserDefaults.standard.set(id, forKey: "backup_cursor")
                 }
                 UserDefaults.standard.set(Array(result.md5Set), forKey: "uploaded_md5")
+            }
+
+            // ===== 第二步：视频（照片备份完毕后再执行）=====
+            var knownVideo = localVideoMd5
+            var resumeVideo = videoID
+            if needFullScan {
+                knownVideo = []
+                resumeVideo = nil
+            }
+            let videoResult = try? await PhotoBackup.backupAllVideos(uploader: uploader,
+                                                                     knownMd5: knownVideo,
+                                                                     lastUploadedID: resumeVideo,
+                                                                     progress: { _, _, _, cursorID in
+                // 每成功上传一个视频，断点实时保存
+                if let id = cursorID {
+                    UserDefaults.standard.set(id, forKey: "backup_video_cursor")
+                }
+            })
+            if let result = videoResult {
+                if let id = result.lastUploadedID {
+                    UserDefaults.standard.set(id, forKey: "backup_video_cursor")
+                }
+                UserDefaults.standard.set(Array(result.md5Set), forKey: "video_md5")
             }
         }
     }
