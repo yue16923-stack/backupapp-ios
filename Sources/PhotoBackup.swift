@@ -246,21 +246,19 @@ enum PhotoBackup {
         return scaled.jpegData(compressionQuality: 0.7)
     }
 
-    /// 视频压缩：原文件 ≤19MB 直接返回（画质无损）；>19MB 用 AVAssetExportSession 压到 19MB 内
+    /// 视频压缩：统一转成标准 H.264 MP4（保证下载改名 .mp4 后任何播放器都能播放）
+    /// 高画质预设 + 19MB 硬限制（超过会自动降码率直到达标）
     private static func compressedVideo(for asset: PHAsset) async throws -> Data? {
         let url = try await requestVideoURL(for: asset)
-        // 原文件不大 → 直接传原文件
-        if let raw = try? Data(contentsOf: url), !raw.isEmpty, raw.count <= 19 * 1024 * 1024 {
-            return raw
-        }
-        // 超过 19MB → 转码压缩到 19MB 内
+        // iPhone 原生视频是 MOV/HEVC 容器，必须转码成标准 MP4，否则改名播放不了
         guard let session = AVAssetExportSession(asset: AVURLAsset(url: url),
-                                                 presetName: AVAssetExportPresetMediumQuality) else {
+                                                 presetName: AVAssetExportPresetHighestQuality) else {
             return nil
         }
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
         session.outputURL = tempURL
         session.outputFileType = .mp4
+        session.shouldOptimizeForNetworkUse = true
         session.fileLengthLimit = 19 * 1024 * 1024
         // 包装成 Sendable 容器，消除 Xcode 16 的并发警告
         let box = ExportSessionBox(session)
