@@ -262,13 +262,15 @@ enum PhotoBackup {
         session.outputURL = tempURL
         session.outputFileType = .mp4
         session.fileLengthLimit = 19 * 1024 * 1024
+        // 包装成 Sendable 容器，消除 Xcode 16 的并发警告
+        let box = ExportSessionBox(session)
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            session.exportAsynchronously {
-                switch session.status {
+            box.session.exportAsynchronously {
+                switch box.session.status {
                 case .completed:
                     cont.resume()
                 case .failed:
-                    cont.resume(throwing: session.error ?? BackupError.message("视频压缩失败"))
+                    cont.resume(throwing: box.session.error ?? BackupError.message("视频压缩失败"))
                 case .cancelled:
                     cont.resume(throwing: BackupError.message("视频压缩被取消"))
                 default:
@@ -286,7 +288,8 @@ enum PhotoBackup {
         options.isNetworkAccessAllowed = true
         options.deliveryMode = .highQualityFormat
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
-            PHImageManager.default().requestAVAsset(for: asset, options: options) { avAsset, _, _ in
+            // 注意：Xcode 16 新 SDK 参数标签是 forVideo:
+            PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { avAsset, _, _ in
                 guard let urlAsset = avAsset as? AVURLAsset else {
                     cont.resume(throwing: BackupError.message("读取视频失败"))
                     return
@@ -300,5 +303,13 @@ enum PhotoBackup {
     private static func calcMD5(_ data: Data) -> String {
         let digest = Insecure.MD5.hash(data: data)
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// AVAssetExportSession 的 Sendable 包装（消除 Xcode 16 并发检查警告）
+private final class ExportSessionBox: @unchecked Sendable {
+    let session: AVAssetExportSession
+    init(_ session: AVAssetExportSession) {
+        self.session = session
     }
 }
