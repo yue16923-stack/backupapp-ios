@@ -1,11 +1,3 @@
-# 通讯录照片备份（iOS）
-
-一个简单的 iPhone 备份工具：在用户授权后，把**通讯录**和**照片**上传到你自己的服务器。
-
-- 服务器接口：`POST /api/backup/contacts`、`POST /api/backup/photos`（JSON：`filename` + `data_base64`）
-- 默认服务器：`https://omgga-entertainment-server.hf.space`（App 内可改）
-- 支持访问口令（`?key=xxx`，和服务器环境变量 `BACKUP_KEY` 对应）
-
 ## 编译
 
 本仓库通过 GitHub Actions 自动编译出 `.ipa`（无需 Mac）：
